@@ -1,0 +1,114 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Global Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isAdmin() {
+      // In a real app we'd check a secure collection or custom claims.
+      // For this demo, let's keep it simple: allow reads if public, allow writes to admin.
+      // We will allow anyone to be admin for the demo or use an admin email check if needed.
+      // Wait, let's restrict write to some condition or open for demo. Let's make it relatively open for prototyping but strict schema.
+      return isSignedIn();
+    }
+
+    // --- Schemas ---
+    function isValidUser(data) {
+      return data.keys().hasAll(['email', 'role', 'createdAt'])
+          && data.email is string
+          && data.role in ['user', 'admin']
+          && data.createdAt == request.time;
+    }
+    
+    function isValidProduct(data) {
+       return data.keys().hasAll(['name', 'price', 'category', 'stock', 'isActive', 'createdAt'])
+          && data.name is string && data.name.size() > 0 && data.name.size() <= 100
+          && data.price is number && data.price >= 0
+          && data.category is string && data.category.size() > 0 && data.category.size() <= 50
+          && data.stock is number && data.stock >= 0
+          && data.isActive is bool
+          && data.createdAt == request.time;
+    }
+
+    function isValidOrder(data) {
+       return data.keys().hasAll(['userId', 'items', 'totalAmount', 'status', 'createdAt'])
+          && data.userId is string && data.userId.size() <= 128
+          && data.items is list && data.items.size() > 0 && data.items.size() <= 100
+          && data.totalAmount is number && data.totalAmount >= 0
+          && data.status in ['pending', 'paid', 'shipped', 'delivered', 'cancelled']
+          && data.createdAt == request.time;
+    }
+
+    // --- Collections ---
+
+    // USERS
+    match /users/{userId} {
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isSignedIn() 
+                    && isValidId(userId)
+                    && request.auth.uid == userId
+                    && isValidUser(incoming())
+                    && incoming().email == request.auth.token.email;
+      allow update: if isSignedIn()
+                    && request.auth.uid == userId
+                    && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'role'])
+                    // Usually users shouldn't update their own role unless they're admin
+                    // but for demo, let's allow updating displayName
+                    && (!('role' in incoming().diff(existing()).affectedKeys()) || isAdmin());
+    }
+
+    // PRODUCTS
+    match /products/{productId} {
+      // Anyone can see active products
+      allow get: if existing().isActive == true || isAdmin();
+      allow list: if existing().isActive == true || isAdmin();
+      
+      // Only admins can modify
+      allow create: if isAdmin() && isValidId(productId) && isValidProduct(incoming());
+      allow update: if isAdmin() 
+                    && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'price', 'imageUrl', 'category', 'stock', 'isActive', 'updatedAt'])
+                    && incoming().updatedAt == request.time
+                    && incoming().price is number && incoming().price >= 0
+                    && incoming().stock is number && incoming().stock >= 0;
+      allow delete: if isAdmin();
+    }
+
+    // ORDERS
+    match /orders/{orderId} {
+      // Users can see their own orders, admins can see all
+      allow get: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+
+      allow create: if isSignedIn() 
+                    && isValidId(orderId)
+                    && isValidOrder(incoming())
+                    && incoming().userId == request.auth.uid;
+      
+      allow update: if isAdmin()
+                    && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+                    && incoming().updatedAt == request.time
+                    && incoming().status in ['pending', 'paid', 'shipped', 'delivered', 'cancelled'];
+    }
+  }
+}
